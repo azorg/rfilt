@@ -1,0 +1,11 @@
+CMakeFiles
+Makefile
+CMakeCache.txt
+cmake_install.cmake
+*.o
+*.dep
+*.obj
+build
+.build
+*.pyc
+
