@@ -8,4 +8,7 @@ cmake_install.cmake
 build
 .build
 *.pyc
+data.txt
+rfilt_test
+
 
