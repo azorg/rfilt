@@ -21,10 +21,13 @@ void rfilt_init(
   double x_max)      // ораничение сверху
 {
   rfilt_tune(self, dt, v_max, a_up_max, a_down_max, r_max, x_min, x_max);
+
   self->x = x_init;
   self->v = 0.;
   self->a = 0.;
-  self->s = 0.;
+
+  self->s  = 0.;
+  self->nt = 0.;
 }
 //-----------------------------------------------------------------------------
 // установка параметров фильтра "на лету"
@@ -53,11 +56,131 @@ double rfilt_step(
   rfilt_t *self, // указатель на внутреннюю структуру фильтра
   double x)      // входное значение для фильтра
 {
-  return x;
+  double trend, A, ds, r, v, a;
+  double rmin = -self->R, rmax = self->R;
+  double a2 = self->a * self->a;
+  double vcrit, s, nt, smin, smax;
+  
+  trend = self->v * self->a;
+  if (trend < 0.)
+  { // торможение (скорость и ускорение не равны нулю и имеют разный знак
+    A = self->Ad; // максимальное приведенное ускорение торможения
+  }
+  else if (trend > 0. || self->a != 0.)
+  { // разгон (знаки скорости и ускорения совпадают
+    // или есть ускорение при нулевой скорости)
+    A = self->Au; // максмальное приведенное ускорение разгона
+  }
+
+  // проверить возможность "малого хода"
+  ds = x - self->x; // требуемое перемещение
+  r = (ds - self->v - self->a * 0.5) * 6.; // рывок для перемещения за 1 такт
+  v = self->v + self->a + r * 0.5; // скорость в конце такта
+  a = self->a + r; // ускорение в конце такта
+  
+  if (fabs(r) <= self->R && fabs(v) <= self->V && fabs(a) <= A)  
+  { // есть условия для малого хода!
+#if 1 // педантично
+    self->x += self->v + self->a * 0.5 + r / 6.;
+    self->v += self->a + r * 0.5;
+    self->a += r;
+#else // упрощенно
+    self->x = x;
+    self->v = v;
+    self->a = a;
+#endif
+    RFILT_DBG("pipe mode: x=%f v=%f a=%f r=%f", self->x, self->v, self->a, r);
+    return self->x;
+  }
+
+  // установить ограничения на величину рывка
+  // огриничить рывок в связи с ограничением ускорения
+  if (rmax >  A - self->a) rmax =  A - self->a;
+  if (rmin < -A - self->a) rmin = -A - self->a;
+
+  // вычислить кртитическую скорость, выше которой требуется
+  // "быстрое" снижения ускорения разгона для предотращения
+  // превышения по модулю максимальной скорости self->V
+  vcrit = self->V - a2 / (2. * self->R);
+  
+  if ((self->a >= 0. && self->v >=  vcrit) || // скорость растёт и достигнет V
+      (self->a <  0. && self->v <= -vcrit))   // скорость падает и достигнет -V
+  { // достигнута критическая скорость, требуется немедленное обнуление ускорения
+    // во избежание превышения максимальной скорости
+    // задаем максимальный рывок с целью снижения ускорения по модулю
+    r = RFILT_LIMIT(-self->a, rmin, rmax);
+    self->x += self->v + self->a * 0.5 + r / 6.;
+    self->v += self->a + r * 0.5;
+    self->a += r;
+    RFILT_DBG("limit Vmax: x=%f v=%f a=%f r=%f", self->x, self->v, self->a, r);
+    return self->x;
+  }
+
+  // проверка возможности торможения до ограничителей Xmax и Xmin
+  s = rfilt_s(self, self->v, self->a, &nt);
+  self->nt = nt;
+  if (self->x + s >= self->Xmax)
+  {
+    r = rmin;
+    self->x += self->v + self->a * 0.5 + r / 6.;
+    self->v += self->a + r * 0.5;
+    self->a += r;
+    RFILT_DBG("stop over Xmax (!): x=%f v=%f a=%f r=%f", self->x, self->v, self->a, r);
+    return self->x;
+  }
+  else if (self->x + s <= self->Xmin)
+  {
+    r = rmax;
+    self->x += self->v + self->a * 0.5 + r / 6.;
+    self->v += self->a + r * 0.5;
+    self->a += r;
+    RFILT_DBG("stop over Xmin (!): x=%f v=%f a=%f r=%f", self->x, self->v, self->a, r);
+    return self->x;
+  }
+
+  // проверить возможность "разгона" и пропорционального управления рывком
+  // если (x[i]+s) "перепрыгнул" через заданный x => тормозим без аналитики
+  if ((ds >= 0. && s >= ds) ||
+      (ds  < 0. && s <= ds))
+  {
+    if (s >= 0.) r = rmin;
+    else         r = rmax;
+    self->x += self->v + self->a * 0.5 + r / 6.;
+    self->v += self->a + r * 0.5;
+    self->a += r;
+    RFILT_DBG("stop over: x=%f v=%f a=%f r=%f", self->x, self->v, self->a, r);
+    return self->x;
+  }
+
+  // пропорциональное управление рывком
+  v = self->v + self->a + rmin * 0.5;
+  a = self->a + rmin;
+  smin = self->v + self->a * 0.5 + rmin / 6. + rfilt_s(self, v, a, &nt);
+  v = self->v + self->a + rmax * 0.5;
+  a = self->a + rmax;
+  smax = self->v + self->a * 0.5 + rmax / 6. + rfilt_s(self, v, a, &nt);
+  if ((ds > smin && ds < smax) ||
+      (ds > smax && ds < smin))
+  { // пропорциональное управление рывком
+    r = (rmax - rmin) / (smax - smin) * (ds - smin) + rmin;
+  }
+  else
+  { // разгон!
+    if      (ds > 0.) r = rmax;
+    else if (ds < 0.) r = rmin;
+    else              r = 0.;
+  }
+
+  self->x += self->v + self->a * 0.5 + r / 6.;
+  self->v += self->a + r * 0.5;
+  self->a += r;
+
+  RFILT_DBG("work: x=%f v=%f a=%f r=%f", self->x, self->v, self->a, r);
+  return self->x;
 }
 //-----------------------------------------------------------------------------
 // расчёт тормозного пути
-// (функция возвращяет минимальный тормозной путь со знаком, а так же nt и r)
+// (функция возвращяет минимальный тормозной путь со знаком, а так же nt)
 double rfilt_s(
   rfilt_t *self, // указатель на внутреннюю структуру фильтра (константы)
   double v,      // приведенная текущая скорость
@@ -141,17 +264,34 @@ double rfilt_s(
       *nt += dt;
     }
     else // if (v < v1)
-    { // торможение с "выбегом" (многофазное)
+    { // торможение с "выбегом" (3 или 4 фазы)
 
+      // фаза 1 (сбрасываем ускорение до нуля)
+      dt = -a / self->R; // помним, что a<0
+      dt2 = dt * dt;
+      s   = v * dt + a * dt2 / 2. + self->R * dt2 * dt / 6.;
+      *nt = dt; 
+      
+      // теперь задача сводится к торможению после равномерного движения
+      // в две или три фазы
+      v = v1 - v; // считаем, что остаточная скорость положительна для удобства
 
-
-
-
-
+      if (v <= Ad2 / self->R)
+      { // торможение состоит из 3-х фаз
+        dt   = sqrt(v / self->R); // время фазы 2 или 3
+        s   -= dt * v;  // тормозной путь ф2 и ф3 
+        *nt += dt * 2.; // время торможения ф2 и ф3
+      }
+      else
+      { // торможение состоит из 4-х фаз
+        dt   = v / self->Ad + self->Ad / self->R; // время фаз 2, 3 и 4
+        s   -= v * dt / 2.; // тормозной путь ф2..ф4
+        *nt += dt;          // время торможения ф2..ф4
+      }
     }
   }
 
-  return s * sig;
+  return s * sig; // вернуть тормозной путь со знаком
 }
 //-----------------------------------------------------------------------------
 
