@@ -61,26 +61,36 @@ double rfilt_step(
   double a2 = self->a * self->a;
   double vcrit, s, nt, smin, smax;
   
+  // ограничить заданное значение
+  x = RFILT_LIMIT(x, self->Xmin, self->Xmax);
+  
   trend = self->v * self->a;
   if (trend < 0.)
   { // торможение (скорость и ускорение не равны нулю и имеют разный знак
     A = self->Ad; // максимальное приведенное ускорение торможения
   }
-  else if (trend > 0. || self->a != 0.)
-  { // разгон (знаки скорости и ускорения совпадают
-    // или есть ускорение при нулевой скорости)
+  else // if (trend >= 0)
+  { // разгон (знаки скорости и ускорения совпадают)
     A = self->Au; // максмальное приведенное ускорение разгона
   }
 
+  // вычислить тормозной путь и время тормозного пути
+  s = rfilt_s(self, self->v, self->a, &nt);
+  self->s  = s;
+  self->nt = nt;
+
+  // требуемое перемещение
+  ds = x - self->x;
+
+#if 0 // FIXME
   // проверить возможность "малого хода"
-  ds = x - self->x; // требуемое перемещение
   r = (ds - self->v - self->a * 0.5) * 6.; // рывок для перемещения за 1 такт
   v = self->v + self->a + r * 0.5; // скорость в конце такта
   a = self->a + r; // ускорение в конце такта
   
   if (fabs(r) <= self->R && fabs(v) <= self->V && fabs(a) <= A)  
   { // есть условия для малого хода!
-#if 1 // педантично
+#if 0 // педантично
     self->x += self->v + self->a * 0.5 + r / 6.;
     self->v += self->a + r * 0.5;
     self->a += r;
@@ -92,33 +102,43 @@ double rfilt_step(
     RFILT_DBG("pipe mode: x=%f v=%f a=%f r=%f", self->x, self->v, self->a, r);
     return self->x;
   }
+#endif
 
   // установить ограничения на величину рывка
   // огриничить рывок в связи с ограничением ускорения
   if (rmax >  A - self->a) rmax =  A - self->a;
   if (rmin < -A - self->a) rmin = -A - self->a;
-
-  // вычислить кртитическую скорость, выше которой требуется
+  
+#if 1 // FIXME 
+  // вычислить критическую скорость, выше которой требуется
   // "быстрое" снижения ускорения разгона для предотращения
   // превышения по модулю максимальной скорости self->V
   vcrit = self->V - a2 / (2. * self->R);
   
   if ((self->a >= 0. && self->v >=  vcrit) || // скорость растёт и достигнет V
-      (self->a <  0. && self->v <= -vcrit))   // скорость падает и достигнет -V
+      (self->a <= 0. && self->v <= -vcrit))   // скорость падает и достигнет -V
   { // достигнута критическая скорость, требуется немедленное обнуление ускорения
     // во избежание превышения максимальной скорости
     // задаем максимальный рывок с целью снижения ускорения по модулю
-    r = RFILT_LIMIT(-self->a, rmin, rmax);
-    self->x += self->v + self->a * 0.5 + r / 6.;
-    self->v += self->a + r * 0.5;
-    self->a += r;
-    RFILT_DBG("limit Vmax: x=%f v=%f a=%f r=%f", self->x, self->v, self->a, r);
-    return self->x;
+    if (self->a != 0.)
+    {
+      r = RFILT_LIMIT(-self->a, rmin, rmax);
+      self->x += self->v + self->a * 0.5 + r / 6.;
+      self->v += self->a + r * 0.5;
+      self->a += r;
+      RFILT_DBG("limit Vmax: x=%f v=%f a=%f r=%f", self->x, self->v, self->a, r);
+      return self->x;
+    }
+    else
+    { // если критеческая скорость достигнута, а=0 установить запрет на рывок
+      if (self->v > 0.) rmax = 0.;
+      if (self->v < 0.) rmin = 0.;
+    }
   }
+#endif
 
+#if 1 // FIXME
   // проверка возможности торможения до ограничителей Xmax и Xmin
-  s = rfilt_s(self, self->v, self->a, &nt);
-  self->nt = nt;
   if (self->x + s >= self->Xmax)
   {
     r = rmin;
@@ -137,7 +157,9 @@ double rfilt_step(
     RFILT_DBG("stop over Xmin (!): x=%f v=%f a=%f r=%f", self->x, self->v, self->a, r);
     return self->x;
   }
+#endif
 
+#if 0 // FIXME
   // проверить возможность "разгона" и пропорционального управления рывком
   // если (x[i]+s) "перепрыгнул" через заданный x => тормозим без аналитики
   if ((ds >= 0. && s >= ds) ||
@@ -151,6 +173,7 @@ double rfilt_step(
     RFILT_DBG("stop over: x=%f v=%f a=%f r=%f", self->x, self->v, self->a, r);
     return self->x;
   }
+#endif
 
   // пропорциональное управление рывком
   v = self->v + self->a + rmin * 0.5;
@@ -165,17 +188,18 @@ double rfilt_step(
     r = (rmax - rmin) / (smax - smin) * (ds - smin) + rmin;
   }
   else
-  { // разгон!
-    if      (ds > 0.) r = rmax;
-    else if (ds < 0.) r = rmin;
-    else              r = 0.;
+  { // не пропорциональный разгон/торможение
+    if      (ds >= smin && ds >= smax) r = rmax;
+    else if (ds <= smin && ds <= smax) r = rmin;
+    else                               r = 0.;
   }
 
   self->x += self->v + self->a * 0.5 + r / 6.;
   self->v += self->a + r * 0.5;
   self->a += r;
 
-  RFILT_DBG("work: x=%f v=%f a=%f r=%f", self->x, self->v, self->a, r);
+  RFILT_DBG("work: x=%f v=%f a=%f r=%f s=%f smin=%f smax=%f rmin=%f rmax=%f",
+             self->x, self->v, self->a, r, s, smin, smax, rmin, rmax);
   return self->x;
 }
 //-----------------------------------------------------------------------------
