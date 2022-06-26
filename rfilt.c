@@ -60,6 +60,7 @@ double rfilt_step(
   double rmin = -self->R, rmax = self->R;
   double a2 = self->a * self->a;
   double vcrit, s, nt, smin, smax;
+  int bingo;
   
   // ограничить заданное значение
   x = RFILT_LIMIT(x, self->Xmin, self->Xmax);
@@ -90,7 +91,7 @@ double rfilt_step(
   
   if (fabs(r) <= self->R && fabs(v) <= self->V && fabs(a) <= A)  
   { // есть условия для малого хода!
-#if 0 // педантично
+#if 1 // педантично
     self->x += self->v + self->a * 0.5 + r / 6.;
     self->v += self->a + r * 0.5;
     self->a += r;
@@ -99,6 +100,9 @@ double rfilt_step(
     self->v = v;
     self->a = a;
 #endif
+    self->v = self->a = 0.; // FIXME
+    //self->v *= 0.3; // FIXME
+    //self->a *= 0.3; // FIXME
     RFILT_DBG("pipe mode: x=%f v=%f a=%f r=%f", self->x, self->v, self->a, r);
     return self->x;
   }
@@ -186,20 +190,22 @@ double rfilt_step(
       (ds > smax && ds < smin))
   { // пропорциональное управление рывком
     r = (rmax - rmin) / (smax - smin) * (ds - smin) + rmin;
+    bingo = 1;
   }
   else
   { // не пропорциональный разгон/торможение
     if      (ds >= smin && ds >= smax) r = rmax;
     else if (ds <= smin && ds <= smax) r = rmin;
     else                               r = 0.;
+    bingo = 0;
   }
 
   self->x += self->v + self->a * 0.5 + r / 6.;
   self->v += self->a + r * 0.5;
   self->a += r;
 
-  RFILT_DBG("work: x=%f v=%f a=%f r=%f s=%f smin=%f smax=%f rmin=%f rmax=%f",
-             self->x, self->v, self->a, r, s, smin, smax, rmin, rmax);
+  RFILT_DBG("work: x=%f v=%f a=%f r=%f ds=%f smin=%f smax=%f rmin=%f rmax=%f bingo=%i",
+             self->x, self->v, self->a, r, ds, smin, smax, rmin, rmax, bingo);
   return self->x;
 }
 //-----------------------------------------------------------------------------
