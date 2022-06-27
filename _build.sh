@@ -26,4 +26,5 @@ cd ./build && make $OPT && cd ..
 #  test `which upx` && upx -q -9 rcrx rctx
 #fi
 
+./rfilt_test 2>q
 
