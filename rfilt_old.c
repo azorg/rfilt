@@ -60,7 +60,7 @@ static double rfilt_limit_r(
   double a,      // приведенное текущее ускорение
   double r)      // предлагаемый рывок
 {
-  double A, vc, kv;
+  double A, va, v1, a1, vc, vc1, R;
 
   if (v * a < 0.)
   { // торможение (скорость и ускорение не равны нулю и имеют разный знак
@@ -79,33 +79,79 @@ static double rfilt_limit_r(
   //r = RFILT_LIMIT_ABS(r, self->R); // FIXME: !!!???
 #endif
 
-#if 1 // ограничить рывок в связи с ограничением скорости
+#if 1  // ограничить рывок в связи с ограничением скорости
+  va = v + a; // вспомагательная переменная без глубокого физического смысла
+  v1 = va + r * 0.5; // скорость на следующем шаге
+  a1 = a + r; // ускорение на следующем шаге
+ 
   // вычислить критическую скорость, выше которой требуется
   // "быстрое" снижения ускорения разгона для предотращения
   // превышения по модулю максимальной скорости self->V
   vc  = self->V - a  * a  / (2. * self->R);
+  vc1 = self->V - a1 * a1 / (2. * self->R);
 
-  if ((a > 0. && v >=  vc) ||
-      (a < 0. && v <= -vc))
+  if (v >= self->V)
+  { // за пределами максимальной скорости
+    if (v > self->V) RFILT_DBG("v=%f > Vmax=%f", v, self->V);
+    R = 2. * (self->V - va);
+    if (r >  R) r =  R; // следужщее значение скорости должно быть self->V
+    if (r > -a) r = -a; // ускорение не должно быть положительным
+    r = RFILT_LIMIT_ABS(r, self->R);
+    RFILT_DBG("1");
+  }
+  else if (v <= -self->V)
+  { // за пределами минимальной скорости
+    if (v < self->V) RFILT_DBG("v=%f > Vmin=%f", v, -self->V);
+    R = -2. * (self->V + va);
+    if (r <  R) r =  R; // следужщее значение скорости должно быть -self->V
+    if (r > -a) r = -a; // ускорение не должно быть отрицательным
+    r = RFILT_LIMIT_ABS(r, self->R);
+    RFILT_DBG("2");
+  }
+  else if ((a > 0. && v >=  vc) ||
+           (a < 0. && v <= -vc))
   { // текущая скорость достигла критической
     r = RFILT_LIMIT_ABS(-a, self->R);
-    RFILT_DBG("critical V: v=%f a=%f r=%f vcrit=%f vapprox=%f",
-              v, a, r, vc, v + a * a / (2. * self->R));
+    RFILT_DBG("3");
   }
-  
-  // FIXME: magic
-  //kv = fabs(fabs(v) - self->V) / (self->V * self->B);
-  //kv = (fabs(fabs(v) - self->V)
-  kv = fabs(v) / self->V; // (1-B)....1
-  kv = (1. - kv) / self->B; // 1...0 
-  if (kv < 1 && kv > 0)
-  { // достигнута бета-окрестность максимальной скорости
-    //double dv = (a + r * 0.5) * kv;
-    //r = 2. * (dv - a);
-    r *= kv;
-    RFILT_DBG("beta Vmax latch: v=%f a=%f kv=%f r=%f",
-               v, a, kv, r);
+#if 0
+  else if (a1 > 0. && v1 > vc1)
+  { // скорость растёт и превысит V, рывок не должен превышать 2*(vc1-v-a)
+    // ограничить рывок, чтоб на следуюм такте скорость не превысила критическую
+    R = 2. * (vc1 - va); 
+    if (r > R) r = R;
+    r = RFILT_LIMIT_ABS(r, self->R);
+    RFILT_DBG("4");
+    printf("4\n");
   }
+  else if (a1 < 0. && v1 < -vc1)
+  { // скорость падает ниже -V, рывок не должен ниже 2*(-vc1-v-a)
+    // ограничить рывок, чтоб на следуюм такте скорость не превысила критическую
+    R = -2. * (vc1 + va); 
+    if (r < R) r = R;
+    r = RFILT_LIMIT_ABS(r, self->R);
+    RFILT_DBG("5");
+  }
+#endif
+
+#ifdef RFILT_DEBUG
+  if (v >=  self->V           ||
+      v <= -self->V           ||
+      (a  > 0. &&  v >=  vc)  ||
+      (a  < 0. &&  v <= -vc)  ||
+      (a1 > 0. && v1 >   vc1) ||
+      (a1 < 0. && v1 <  -vc1))
+  {
+    double V0, V1;
+    if (a  >= 0.)    V0 = v + a * a  / (2. * self->R);
+    else             V0 = v - a * a  / (2. * self->R);
+    if (a + r >= 0.) V1 = v + a + r/2. + (a + r) * (a + r) / (2. * self->R);
+    else             V1 = v + a + r/2. - (a + r) * (a + r) / (2. * self->R);
+
+    RFILT_DBG("limit Vmax: v=%f...%f a=%f r=%f vcrit=%f vapprox=%f...%f",
+              v, v + a + r/2., a, r, vc, V0, V1);
+  }
+#endif // RFILT_DEBUG
 #endif
 
   return r;
