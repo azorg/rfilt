@@ -231,7 +231,8 @@ static double rfilt_r(
   double a,      // приведенное текущее ускорение
   double dx)     // невязка заданой и текущей позиции
 {
-  double r1, r2, s1, s2, v1, v2, a1, a2, r, s, nt1, nt2;
+  double r1, r2, s1, s2, v1, v2, a1, a2, r, nt;
+  double s;
   double R = self->R;
   double sig = (dx >= 0.) ? 1. : -1.;
 
@@ -239,9 +240,9 @@ static double rfilt_r(
   v  *= sig;
   a  *= sig;
   dx *= sig; // теперь dx >= 0
-  
+
   // FIXME: магия!
-  dx *= (1. - self->B);
+  dx *= 1. - self->B;
 
   // расчитать тормозной путь для максимального и минимального рывка
   r1 = rfilt_limit_r(self, v, a, -R);
@@ -252,15 +253,15 @@ static double rfilt_r(
   v2 = v + a + r2 * 0.5;
   a1 = a + r1;
   a2 = a + r2;
-  s1 += rfilt_s(self, self->R, v1, a1, &nt1);
-  s2 += rfilt_s(self, self->R, v2, a2, &nt2);
+  s1 += rfilt_s(self, self->R, v1, a1, &nt);
+  s2 += rfilt_s(self, self->R, v2, a2, &nt);
 
   if (dx <= s1 && dx <= s2)
   { // торможение
     double a2 = a * a;
     double Ad2 = self->Ad * self->Ad;
-    if (s1 <= s2) { r = r1; self->s = s1; self->nt = nt1 + 1.; } // dx <= s1 <= s2 
-    else          { r = r2; self->s = s2; self->nt = nt2 + 1.; } // dx <= s2 <  s1
+    if (s1 <= s2) { r = r1; self->s = s1; } // dx <= s1 <= s2
+    else          { r = r2; self->s = s2; } // dx <= s2 <  s1
     // торможение состоит из от 1-й до 4-х фаз:
     // 1. сброс ускорения разгона с рывком r<0 и набором сокрости (если a>0)
     // 2. набор (добор) тормозного ускорения со сбросом скорости и с рывком r<0
@@ -302,15 +303,14 @@ static double rfilt_r(
   }
   else if (dx >= s1 && dx >= s2)
   { // разгон
-    if (s1 >= s2) { r = r1; self->s = s1; self->nt = nt1 + 1; } // s2 <= s1 <= dx
-    else          { r = r2; self->s = s2; self->nt = nt2 + 1; } // s1 <  s2 <= dx
-    RFILT_DBG("accelerate (Rmax)");
+    if (s1 >= s2) { r = r1; self->s = s1; } // s2 <= s1 <= dx
+    else          { r = r2; self->s = s2; } // s1 <  s2 <= dx
+    RFILT_DBG("limit r=%f)", r);
   }
   else
-  { // пропорциональное управление рывком
+  { // пропорциональное управление рывком (dx между s1 и s2)
     if (s1 <= s2)
     { // s1 < dx < s2
-      self->nt = nt1;
       self->s = s1;
     }
     else
@@ -318,47 +318,44 @@ static double rfilt_r(
       double tmp = r2;
       r2 = r1;
       r1 = tmp;
-      self->nt = nt2;
-      self->s = s2;
+      tmp = s2;
       s2 = s1;
-      s1 = self->s; // теперь s1 < dx < s2 
+      s1 = tmp; // теперь s1 < dx < s2
     }
-    
-    if (s1 == s1)
+
+    if (s1 == s2)
       r = 0.;
     else
-      r = (dx - s1) * (r2 - r1) / (s2 - s1) - r1;
+      r = (dx - s1) * (r2 - r1) / (s2 - s1) + r1;
 
 #if 1
     // вторая итерация
     s = v + a * 0.5 + r / 6.;
     v += a + r * 0.5;
     a += a + r;
-    s += rfilt_s(self, self->R, v, a, &self->nt);
-    self->nt += 1.;
-    
+    s += rfilt_s(self, self->R, v, a, &nt);
+
     if (dx >= s)
     { // s1 <= s <= dx < s2
       s1 = s;
       r1 = r;
     }
-    else
+    else // dx < s
     { // s1 < dx < s < s2
       s2 = s;
       r2 = r;
     }
 
-    if (s1 == s1)
+    if (s1 == s2)
       r = 0.;
     else
-      r = (dx - s1) * (r2 - r1) / (s2 - s1) - r1;
+      r = (dx - s1) * (r2 - r1) / (s2 - s1) + r1;
 #endif
 
-    RFILT_DBG("accelerate (calc R)");
+    RFILT_DBG("latch r=%f", r);
   }
-  
+
   // восстановить знаки
-  self->s *= sig;
   return r * sig;
 }
 //-----------------------------------------------------------------------------
@@ -376,10 +373,45 @@ double rfilt_step(
   // требуемое перемещение
   dx = y - self->x;
 
+#if 0 // FIXME
+  // проверить возможность "малого хода"
+  if (fabs(dx) < self->R / 24.) // FIXME: это не строгий код!
+  {
+    RFILT_DBG("pipe mode: x=y=%f v=%f a=%f", y, self->v, self->a);
+    self->v = self->a = 0.;
+    self->x = y;
+    return self->x;
+  }
+#endif
+
   // вычислить рывок
   r = rfilt_r(self, self->v, self->a, dx);
 
+  // вычислить тормозной путь и время торможения
+  self->s = rfilt_s(self, self->R, self->v, self->a, &self->nt);
+
   xs = self->x + self->s;
+
+#if 0  // проверить малый шаг
+  if (r != 0.)
+  {
+    double t = -self->a / r;
+    if (t > 0. && t < 1.)
+    { // врмя обнуления ускорения менее одного такта!
+      double t2 = t * t;
+
+      // выполнить расчёт следующей позиции, скорости и ускорения
+      self->x += self->v * t + self->a * t2 * 0.5 + r * t2 * t / 6.;
+      self->v += self->a * t + r * t2 * 0.5;
+      self->a += r * t;
+
+      RFILT_DBG("stop: y=%f x=%f v=%f a=%f r=%f dx=%f s=%f x+s=%f nt=%f",
+               y, self->x, self->v, self->a, r, dx, self->s, xs, self->nt);
+
+      return self->x;
+    }
+  }
+#endif
 
   RFILT_DBG("work: y=%f x=%f v=%f a=%f r=%f dx=%f s=%f x+s=%f nt=%f",
              y, self->x, self->v, self->a, r, dx, self->s, xs, self->nt);
