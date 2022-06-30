@@ -328,7 +328,10 @@ static double rfilt_r(
     else
       r = (dx - s1) * (r2 - r1) / (s2 - s1) + r1;
 
-#if 1
+    RFILT_DBG("latch r=%f r1=%f r2=%f s1=%f s2=%f",
+              r, r1, r2, s1, s2);
+
+#if 0
     // вторая итерация
     s = v + a * 0.5 + r / 6.;
     v += a + r * 0.5;
@@ -351,8 +354,6 @@ static double rfilt_r(
     else
       r = (dx - s1) * (r2 - r1) / (s2 - s1) + r1;
 #endif
-
-    RFILT_DBG("latch r=%f", r);
   }
 
   // восстановить знаки
