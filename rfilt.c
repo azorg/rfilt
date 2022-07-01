@@ -267,7 +267,7 @@ static int rfilt_test(
   // итерационный поиск t1 <= t <= t2
   // такого, что S*(t) >= dx, а t+nt(t) <= dt
   // FIXME: не эффективный алгоритм!!!
-  for (i = 0; i < 100; i++) // FIXME: магия больших чисел!
+  for (i = 0; i < RFILT_ITER_NUM ; i++) // FIXME: магия больших чисел!
   {
     t = (t1 + t2) * 0.5;
 
@@ -283,8 +283,8 @@ static int rfilt_test(
     {
       if (s >= dx)
       {
-        RFILT_DBG("bingo dx=%f dt=%f t=%f S(t)=%f x+S(t)=%f",
-                  dx, dt, t, s, self->x + s);
+        RFILT_DBG("bingo i=%i (dx=%f dt=%f t=%f S(t)=%f x+S(t)=%f)",
+                  i + 1, dx, dt, t, s, self->x + s);
         return 1;
       }
       t1 = t;
@@ -303,30 +303,32 @@ static double rfilt_r(
   double a,      // приведенное текущее ускорение
   double dx)     // невязка заданой и текущей позиции
 {
-  double r, r1, r2, s, s1, s2, v1, v2, a1, a2, nt;
-  double R = self->R;
+  double r, r1, r2, s, s1, s2, v1, v2, a1, a2, A, V, nt;
+  double R = self->R; // предельно-допустимый рывок
+  double Rw = R  * (1. - self->B); // рабочий заниженный рывок
   double sig = (dx >= 0.) ? 1. : -1.;
+  int i;
 
   // привести знаки относитльн dx
   v  *= sig;
   a  *= sig;
   dx *= sig; // теперь dx >= 0
 
-#if 1 // FIXME: магия!
+#if 0 // FIXME: магия!
   dx *= 1. - self->B;
 #endif
 
   // расчитать тормозной путь для максимального и минимального рывка
-  r1 = rfilt_limit_r(self, v, a, -self->R);
-  r2 = rfilt_limit_r(self, v, a,  self->R);
+  r1 = rfilt_limit_r(self, v, a, -R);
+  r2 = rfilt_limit_r(self, v, a,  R);
   s1 = v + a * 0.5 + r1 / 6.;
   s2 = v + a * 0.5 + r2 / 6.;
   v1 = v + a + r1 * 0.5;
   v2 = v + a + r2 * 0.5;
   a1 = a + r1;
   a2 = a + r2;
-  s1 += rfilt_s(self, self->R, v1, a1, &nt);
-  s2 += rfilt_s(self, self->R, v2, a2, &nt);
+  s1 += rfilt_s(self, Rw, v1, a1, &nt);
+  s2 += rfilt_s(self, Rw, v2, a2, &nt);
 
   if (dx <= s1 && dx <= s2)
   { // торможение
@@ -351,16 +353,12 @@ static double rfilt_r(
         //r = R;
         r = a2 / (2. * v); // FIXE
         if (r > -a) r = a;
-        // FIXME:
-        //!!!self->v = a2 / (2. * R); // коррекция накапливаемых ошибок вычислений!
         RFILT_DBG("stop phase #4");
       }
       else if (v <= v + (a2 - Ad2) / (2. * R) ||
                a <= -self->Ad)
       { // фаза 3: сброс скорости без рывка до a*a/(2*Rd) c a=-Ad
         r = 0.;
-        //!!!if (2. * (v + a) * R < a2)
-        //!!!  r = 2. * (a2 / (2. * R) - v - a);
         RFILT_DBG("stop phase #3");
       }
       else // a > -Ad && 2*v*Rd > a2 && a<=0 && v<=v+(a2-Ad2)/(2*Rd)
@@ -377,12 +375,12 @@ static double rfilt_r(
   { // разгон
     if (s1 >= s2) r = r1; // s2 <= s1 <= dx
     else          r = r2; // s1 <  s2 <= dx
-    RFILT_DBG("accelerate");
+    RFILT_DBG("move");
   }
   else
   { // пропорциональное управление рывком (dx между s1 и s2)
     if (s2 < s1)
-    { // s2 < dx < s1 => поменять местами r1<->r2, s1<->s2 
+    { // s2 < dx < s1 => поменять местами r1<=>r2, s1<=>s2 
       r  = r2;
       r2 = r1;
       r1 = r;
@@ -391,36 +389,41 @@ static double rfilt_r(
       s1 = s; // теперь s1 < dx < s2
     }
 
-    if (s1 == s2)
-      r = 0.;
-    else
-      r = (dx - s1) * (r2 - r1) / (s2 - s1) + r1;
+    // итеративный подбор рывка на следующий такт
+    for (i = 1;; i++)
+    {
+      if (s1 == s2)
+      { // этого быть не может, но защита от деления на 0 должна быть
+        r = 0.;
+        break;
+      }
+      else
+        r = (dx - s1) * (r2 - r1) / (s2 - s1) + r1;
 
-    RFILT_DBG("latch r=%f r1=%f r2=%f s1=%f s2=%f",
-              r, r1, r2, s1, s2);
+      if (i >= RFILT_ITER_NUM) break;
 
-#if 1 // вторая итерация
-    s  = v + a * 0.5 + r / 6.;
-    v += a + r * 0.5;
-    a += a + r;
-    s += rfilt_s(self, self->R, v, a, &nt);
+      s = v + a * 0.5 + r / 6.;
+      V = v + a + r * 0.5;
+      A = a + r;
+      s += rfilt_s(self, Rw, V, A, &nt);
 
-    if (s <= dx)
-    { // s1 <= s <= dx < s2
-      s1 = s;
-      r1 = r;
-    }
-    else // dx < s
-    { // s1 < dx < s < s2
-      s2 = s;
-      r2 = r;
-    }
-
-    if (s1 == s2)
-      r = 0.;
-    else
-      r = (dx - s1) * (r2 - r1) / (s2 - s1) + r1;
-#endif
+      if (s < dx)
+      { // s1 <= s < dx < s2
+        if (s == s1) break;
+        s1 = s;
+        r1 = r;
+      }
+      else if (s > dx) // dx < s
+      { // s1 < dx < s <= s2
+        if (s == s2) break;
+        s2 = s;
+        r2 = r;
+      }
+      else // s == dx
+        break;
+    } // for
+    RFILT_DBG("latch #%i r=%f (r1=%f r2=%f s1=%f s2=%f)",
+              i, r * sig, r1 * sig, r2 * sig, s1 * sig, s2 * sig);
   }
 
   // восстановить знаки
@@ -443,7 +446,7 @@ double rfilt_step(
 
 #if 1 // FIXME
   // проверить возможность "малого хода"
-  if (rfilt_test(self, self->v, self->a, dx, 2.0))
+  if (rfilt_test(self, self->v, self->a, dx, 1.0))
   {
     RFILT_DBG("pipe mode: x=y=%f v=%f a=%f s=%f, nt=%f",
               y, self->v, self->a, self->s, self->nt);

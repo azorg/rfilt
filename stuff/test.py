@@ -3,10 +3,10 @@
 
 from math import *
 
-r = 1.
+r = 0.000120
 t = 10.
 
-v = 1. + r * t * t * 0.5
+v = 0 + r * t * t * 0.5
 a = r * t
 
 a = -a
