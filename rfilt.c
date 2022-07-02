@@ -89,20 +89,20 @@ static double rfilt_limit_r(
       (a < 0. && v <= -vc))
   { // текущая скорость достигла критической
     r = RFILT_LIMIT_ABS(-a, self->R);
-    RFILT_DBG("critical V: v=%f a=%f r=%f vcrit=%f vapprox=%f",
-              v, a, r, vc, v + a * a / (2. * self->R));
+    //RFILT_DBG("critical V: v=%f a=%f r=%f vcrit=%f vapprox=%f",
+    //          v, a, r, vc, v + a * a / (2. * self->R));
   }
   else if (a >= 0. && v > self->V)
   { // скорость превысила +Vmax
     a = 0.;
     if (r > 0.) r = 0.;
-    RFILT_DBG("v=%f > Vmax=%f r=%f", v, self->V, r);
+    //RFILT_DBG("v=%f > Vmax=%f r=%f", v, self->V, r);
   }
   else if (a <= 0. && v < -self->V)
   { // скорость ниже -Vmin
     a = 0.;
     if (r < 0.) r = 0.;
-    RFILT_DBG("v=%f < -Vmax=%f r=%f", v, -self->V, r);
+    //RFILT_DBG("v=%f < -Vmax=%f r=%f", v, -self->V, r);
   }
 #endif
 
@@ -236,11 +236,11 @@ static int rfilt_jump(
   int i;
   double s, nt, sig;
   double A2 = a * a, A, V, T2;
-  double t, t1, t2;
-  double r = self->R;
+  double t, t1, t2, r;
+  double R = self->R; // предельно-допустимый рывок
 
   // вычислить тормозной путь и время торможения
-  self->s = s = rfilt_s(self, self->R, v, a, &self->nt);
+  self->s = s = rfilt_s(self, R, v, a, &self->nt);
 
   if (self->nt > dt) return 0; // тормозной путь более заданного
 
@@ -254,10 +254,11 @@ static int rfilt_jump(
   if (s > dx) return 0; // тормозной путь больше заданного перемещения
 
 #if 1
-  if (s == dx) return 1; // тормозной путь совпал с заданным перемещением (!)
+  if (s == dx) return 1; // тормозной путь совпал с заданным перемещением
 #endif
 
   // выбор рывка "разгона"
+  r = R;
   if (a < 0. && 2. * v * r <= A2)
     r = -r; // уход от фазы сброса тормозного ускорения
 
@@ -266,25 +267,25 @@ static int rfilt_jump(
 
   // итерационный поиск t1 <= t <= t2
   // такого, что S*(t) >= dx, а t+nt(t) <= dt
-  // FIXME: не эффективный алгоритм!!!
+  // FIXME: не эффективный алгоритм, требуется оптимизация!
   for (i = 0; i < RFILT_ITER_NUM ; i++)
   {
-    t = (t1 + t2) * 0.5;
+    t = (t2 + t1) * 0.5;
 
     // вычислить S*(t) - суммарный путь разгона и торможения
     T2 = t * t;
     s = v * t + a * T2 * 0.5 + r * T2 * t / 6.;
     V = v + a * t + r * T2 * 0.5;
     A = a + r * t;
-    s += rfilt_s(self, self->R, V, A, &nt); // S*(t)
+    s += rfilt_s(self, R, V, A, &nt); // S*(t)
     //RFILT_DBG("t=%f S(t)=%f x+S(t)=%f", t, s, self->x + s);
 
     if (t + nt <= dt)
     {
       if (s >= dx)
-      {
-        RFILT_DBG("bingo i=%i (dx=%f dt=%f t=%f S(t)=%f x+S(t)=%f)",
-                  i + 1, dx, dt, t, s, self->x + s);
+      { // S*(t) >= dx => за данное время перемещение возможно
+        RFILT_DBG("bingo i=%i (dx=%f dt=%f t=%f T(t)=%f S(t)=%f x+S(t)=%f)",
+                  i + 1, dx, dt, t, t+nt, s, self->x + s);
         return 1;
       }
       t1 = t;
@@ -293,7 +294,7 @@ static int rfilt_jump(
       t2 = t;
   }
 
-   return 0;
+  return 0;
 }
 //-----------------------------------------------------------------------------
 // расчёт рывка
@@ -303,18 +304,17 @@ static double rfilt_r(
   double a,      // приведенное текущее ускорение
   double dx)     // невязка заданной и текущей позиции
 {
-  double r, r1, r2, s, s1, s2, v1, v2, a1, a2, A, V, nt;
-  double R = self->R; // предельно-допустимый рывок
-  double Rw = R  * (1. - self->B); // рабочий заниженный рывок
+  double r, r1, r2, s1, s2, v1, v2, a1, a2, nt;
+  double R = self->R; // максимальный рывок
+  double Rw = R  * (1. - self->B); // максимальный рабочий (заниженный) рывок
   double sig = (dx >= 0.) ? 1. : -1.;
-  int i;
 
   // привести знаки относительно dx
   v  *= sig;
   a  *= sig;
   dx *= sig; // теперь dx >= 0
 
-#if 0 // FIXME: магия!
+#if 1 // FIXME: магия для ликвидации выбега
   dx *= 1. - self->B;
 #endif
 
@@ -338,10 +338,10 @@ static double rfilt_r(
     if (s1 <= s2) r = r1; // dx <= s1 <= s2
     else          r = r2; // dx <= s2 <  s1
     // торможение состоит из от 1-й до 4-х фаз:
-    // 1. сброс ускорения разгона с рывком r<0 и набором скорости (если a>0)
-    // 2. набор (добор) тормозного ускорения со сбросом скорости и с рывком r<0
+    // 1. сброс ускорения разгона с рывком r=-R и набором скорости (если a>0)
+    // 2. набор (добор) тормозного ускорения со сбросом скорости и с рывком r=-R
     // 3. сброс скорости с постоянным ускорением без рывка r=0 (если ускорение достигло максимума)
-    // 4. сброс скорости и тормозного ускорения до нуля с положительным рывком r>0
+    // 4. сброс скорости и тормозного ускорения до нуля с положительным рывком r=Rw
     if (a > 0.)
     { // фаза 1: требуется сброс ускорения разгона до 0 и далее
       r = -R;
@@ -349,16 +349,16 @@ static double rfilt_r(
     }
     else // if a <= 0
     {
-      if (2. * v * R <= a2)
+      if (2. * v * Rw <= a2)
       { // фаза 4: требуется сброс тормозного ускорения и остаточной скорости до нуля
-        //r = R;
-        r = a2 / (2. * v); // FIXE
+        r = Rw;
+        //r = a2 / (2. * v); // FIXE
         if (r > -a) r = a;
         RFILT_DBG("stop phase #4");
       }
-      else if (v <= v + (a2 - Ad2) / (2. * R) ||
+      else if (v <= v + (a2 - Ad2) / (2. * Rw) ||
                a <= -self->Ad)
-      { // фаза 3: сброс скорости без рывка до a*a/(2*Rd) c a=-Ad
+      { // фаза 3: сброс скорости без рывка до a*a/(2*Rw) c a=-Ad
         r = 0.;
         RFILT_DBG("stop phase #3");
       }
@@ -373,58 +373,42 @@ static double rfilt_r(
     r = rfilt_limit_r(self, v, a, r);
   }
   else if (dx >= s1 && dx >= s2)
-  { // разгон
+  { // разгон с +/-R
     if (s1 >= s2) r = r1; // s2 <= s1 <= dx
     else          r = r2; // s1 <  s2 <= dx
     RFILT_DBG("move");
   }
   else
   { // пропорциональное управление рывком (dx между s1 и s2)
-    if (s2 < s1)
-    { // s2 < dx < s1 => поменять местами r1<=>r2, s1<=>s2 
-      r  = r2;
-      r2 = r1;
-      r1 = r;
-      s  = s2;
-      s2 = s1;
-      s1 = s; // теперь s1 < dx < s2
+    // метод секущей + метод простых итераций
+    if (s1 == s2)
+    { // этого быть не может, но защита от деления на 0 должна быть
+      RFILT_DBG("impossible s1=s2 => r=0");
+      r = 0.;
     }
+    else
+    { // оценить предварительное значение рывка методом касательной
+      int i;
+      double s = dx;
+      double k = (r2 - r1) / (s2 - s1);
+      r = (dx - s1) * k + r1;
+      RFILT_DBG("begin r=%f", r * sig);
 
-    // итеративный подбор рывка на следующий такт
-    for (i = 1;; i++)
-    {
-      if (s1 == s2)
-      { // этого быть не может, но защита от деления на 0 должна быть
-        r = 0.;
-        break;
+      // подбор рывка методом простой итерации
+      for (i = 0; i < RFILT_ITER_NUM; i++)
+      {
+        double V = v + a + r * 0.5;
+        double A = a + r;
+        s = v + a * 0.5 + r / 6.;
+        s += rfilt_s(self, Rw, V, A, &nt);
+        if (s == dx) break;
+        r += (dx - s) * k;
+        //RFILT_DBG("iterate i=%i r=%f s(r)=%f",
+        //           i, r * sig, s * sig);
       }
-      else
-        r = (dx - s1) * (r2 - r1) / (s2 - s1) + r1;
-
-      if (i >= RFILT_ITER_NUM) break;
-
-      s = v + a * 0.5 + r / 6.;
-      V = v + a + r * 0.5;
-      A = a + r;
-      s += rfilt_s(self, Rw, V, A, &nt);
-
-      if (s < dx)
-      { // s1 <= s < dx < s2
-        if (s == s1) break;
-        s1 = s;
-        r1 = r;
-      }
-      else if (s > dx) // dx < s
-      { // s1 < dx < s <= s2
-        if (s == s2) break;
-        s2 = s;
-        r2 = r;
-      }
-      else // s == dx
-        break;
-    } // for
-    RFILT_DBG("latch #%i r=%f (r1=%f r2=%f s1=%f s2=%f)",
-              i, r * sig, r1 * sig, r2 * sig, s1 * sig, s2 * sig);
+      RFILT_DBG("latch i=%i r=%f (r1=%f r2=%f s1=%f s2=%f s(r)=%f dx=%f)",
+                i, r * sig, r1 * sig, r2 * sig, s1 * sig, s2 * sig, s * sig, dx * sig);
+    }
   }
 
   // восстановить знаки
@@ -466,7 +450,7 @@ double rfilt_step(
   RFILT_DBG("work: y=%f x=%f v=%f a=%f r=%f dx=%f s=%f x+s=%f nt=%f",
              y, self->x, self->v, self->a, r, dx, self->s,
              self->x + self->s, self->nt);
- 
+
   // выполнить расчёт следующей позиции, скорости и ускорения
   self->x += self->v + self->a * 0.5 + r / 6.;
   self->v += self->a + r * 0.5;
