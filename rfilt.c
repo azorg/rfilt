@@ -251,6 +251,8 @@ static int rfilt_jump(
   a  *= sig;
   dx *= sig; // теперь dx >= 0
 
+  // FIXME: magic
+  //if (s > dx * (1. + self->B)) return 0; // тормозной путь больше заданного перемещения
   if (s > dx) return 0; // тормозной путь больше заданного перемещения
 
 #if 1
@@ -268,7 +270,7 @@ static int rfilt_jump(
   // итерационный поиск t1 <= t <= t2
   // такого, что S*(t) >= dx, а t+nt(t) <= dt
   // FIXME: не эффективный алгоритм, требуется оптимизация!
-  for (i = 0; i < RFILT_ITER_NUM ; i++)
+  for (i = 0; i < RFILT_ITER_NUM; i++)
   {
     t = (t2 + t1) * 0.5;
 
@@ -278,7 +280,8 @@ static int rfilt_jump(
     V = v + a * t + r * T2 * 0.5;
     A = a + r * t;
     s += rfilt_s(self, R, V, A, &nt); // S*(t)
-    //RFILT_DBG("t=%f S(t)=%f x+S(t)=%f", t, s, self->x + s);
+    //RFILT_DBG("t=%f T(t)=%f S(t)=%f x+S(t)=%f",
+    //          t, t+nt, s, self->x + s);
 
     if (t + nt <= dt)
     {
@@ -333,7 +336,7 @@ static double rfilt_r(
 
   if (dx <= s1 && dx <= s2)
   { // торможение
-    double a2 = a * a;
+    double A2 = a * a;
     double Ad2 = self->Ad * self->Ad;
     if (s1 <= s2) r = r1; // dx <= s1 <= s2
     else          r = r2; // dx <= s2 <  s1
@@ -349,14 +352,15 @@ static double rfilt_r(
     }
     else // if a <= 0
     {
-      if (2. * v * Rw <= a2)
+      if (2. * v * Rw <= A2)
       { // фаза 4: требуется сброс тормозного ускорения и остаточной скорости до нуля
-        r = Rw;
-        //r = a2 / (2. * v); // FIXE
+        //r = R;
+        //r = Rw;
+        r = A2 / (2. * v); // FIXME
         if (r > -a) r = a;
         RFILT_DBG("stop phase #4");
       }
-      else if (v <= v + (a2 - Ad2) / (2. * Rw) ||
+      else if (v <= v + (A2 - Ad2) / (2. * Rw) ||
                a <= -self->Ad)
       { // фаза 3: сброс скорости без рывка до a*a/(2*Rw) c a=-Ad
         r = 0.;
@@ -380,18 +384,36 @@ static double rfilt_r(
   }
   else
   { // пропорциональное управление рывком (dx между s1 и s2)
-    // метод секущей + метод простых итераций
     if (s1 == s2)
-    { // этого быть не может, но защита от деления на 0 должна быть
-      RFILT_DBG("impossible s1=s2 => r=0");
+    { // такого не может быть, но защита от деления на нуль должна быть 
       r = 0.;
     }
     else
-    { // оценить предварительное значение рывка методом касательной
+    { // найти S(r) ~ dx
       int i;
-      double s = dx;
-      double k = (r2 - r1) / (s2 - s1);
+      double s, k = (r2 - r1) / (s2 - s1);
+#if 0
+      double s;
+      if (s2 < s1)
+      { // поменять местами s1 <=> s2, r1 <=> r2
+        r  = r1;
+        r1 = r2;
+        r2 = r;
+        s  = s1;
+        s1 = s2;
+        s2 = s; // теперь s1 <= dx <= s2;
+      }
+
+      if (s1 >= 0.)
+      { // 0 <= s1 <= dx <= s2
+        r = r1; 
+      }
+      else
+        r = 0.; // FIXME
+#else
+      //  вычисалить начальное значение методом секущей 
       r = (dx - s1) * k + r1;
+#endif
       RFILT_DBG("begin r=%f", r * sig);
 
       // подбор рывка методом простой итерации
@@ -401,13 +423,13 @@ static double rfilt_r(
         double A = a + r;
         s = v + a * 0.5 + r / 6.;
         s += rfilt_s(self, Rw, V, A, &nt);
-        if (s == dx) break;
         r += (dx - s) * k;
+        if (s <= dx && i >= (RFILT_ITER_NUM/2)) break; // FIXME
         //RFILT_DBG("iterate i=%i r=%f s(r)=%f",
         //           i, r * sig, s * sig);
       }
-      RFILT_DBG("latch i=%i r=%f (r1=%f r2=%f s1=%f s2=%f s(r)=%f dx=%f)",
-                i, r * sig, r1 * sig, r2 * sig, s1 * sig, s2 * sig, s * sig, dx * sig);
+      RFILT_DBG("latch i=%i r=%f (r1=%f r2=%f s1=%f s2=%f s(r)=%f dx=%f nt(r)=%f)",
+                i, r * sig, r1 * sig, r2 * sig, s1 * sig, s2 * sig, s * sig, dx * sig, nt);
     }
   }
 
