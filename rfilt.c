@@ -521,7 +521,12 @@ double rfilt_step(
 // (функция возвращает траекторию тормозного пути)
 double rfilt_stop(rfilt_t *self)
 {
-  return rfilt_step(self, self->x + self->s);
+  // вычислить тормозной путь и время торможения
+  self->s = rfilt_s(self, self->R, self->v, self->a, &self->nt);
+  if (self->s != 0.)
+    return rfilt_step(self, self->x + self->s);
+  else
+    return self->x;
 }
 //-----------------------------------------------------------------------------
 
