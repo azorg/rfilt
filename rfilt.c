@@ -54,6 +54,7 @@ void rfilt_tune(
 }
 //-----------------------------------------------------------------------------
 // ограничение рывка в связи с ограничением скорости и ускорения
+// TODO: реализовать более точное ограничение скорости
 static double rfilt_limit_r(
   rfilt_t *self, // указатель на внутреннюю структуру фильтра (константы)
   double v,      // приведенная текущая скорость
@@ -87,7 +88,7 @@ static double rfilt_limit_r(
 
   if ((a > 0. && v >=  vc) ||
       (a < 0. && v <= -vc))
-  { // текущая скорость достигла критической
+  { // скорость достигнла (УЖЕ!) критической - ограничить рывок для роста ускорения
     r = RFILT_LIMIT_ABS(-a, self->R);
     //RFILT_DBG("critical V: v=%f a=%f r=%f vcrit=%f vapprox=%f",
     //          v, a, r, vc, v + a * a / (2. * self->R));
@@ -226,12 +227,13 @@ static double rfilt_s(
 //-----------------------------------------------------------------------------
 // проверка возможности заданного перемещения за один такт
 // (функция возвращает 1, если перемещение на dx возможно за 1 такт, иначе 0)
-static int rfilt_jump(
+static int rfilt_pipe(
   rfilt_t *self, // указатель на внутреннюю структуру фильтра (константы)
   double v,      // приведенная текущая скорость
   double a,      // приведенное текущее ускорение
   double dx,     // невязка заданной и текущей позиции
-  double dt)     // максимальное время на заданное перемещение
+  double dt,     // максимальное время на заданное перемещение (обычно 1.0)
+  double *T)     // примерная оценка времени на заданное перемещение [0..dt]
 {
   int i;
   double s, nt, sig;
@@ -239,27 +241,27 @@ static int rfilt_jump(
   double t, t1, t2, r;
   double R = self->R; // предельно-допустимый рывок
 
-  // вычислить тормозной путь и время торможения
-  self->s = s = rfilt_s(self, R, v, a, &self->nt);
-
-  if (self->nt > dt) return 0; // тормозной путь более заданного
+  if (self->nt > dt) return 0; // тормозной путь более заданного по времени
 
   // привести знаки относитльн dx
+  s  = self->s; // тормозной путь
   sig = (dx >= 0.) ? 1. : -1.;
   s  *= sig;
   v  *= sig;
   a  *= sig;
   dx *= sig; // теперь dx >= 0
 
-  // FIXME: magic
-  //if (s > dx * (1. + self->B)) return 0; // тормозной путь больше заданного перемещения
   if (s > dx) return 0; // тормозной путь больше заданного перемещения
 
 #if 1
-  if (s == dx) return 1; // тормозной путь совпал с заданным перемещением
+  if (s == dx)
+  {
+    *T = self->nt;
+    return 1; // тормозной путь чудесно совпал с заданным перемещением
+  }
 #endif
 
-  // выбор рывка "разгона"
+  // выбор короткого рывка "разгона"
   r = R;
   if (a < 0. && 2. * v * r <= A2)
     r = -r; // уход от фазы сброса тормозного ускорения
@@ -267,7 +269,7 @@ static int rfilt_jump(
   t1 = 0.;
   t2 = dt - self->nt;
 
-  // итерационный поиск t1 <= t <= t2
+  // итерационный поиск времени короткого разгона t: t1 <= t <= t2
   // такого, что S*(t) >= dx, а t+nt(t) <= dt
   // FIXME: не эффективный алгоритм, требуется оптимизация!
   for (i = 0; i < RFILT_ITER_NUM; i++)
@@ -289,6 +291,7 @@ static int rfilt_jump(
       { // S*(t) >= dx => за данное время перемещение возможно
         RFILT_DBG("bingo i=%i (dx=%f dt=%f t=%f T(t)=%f S(t)=%f x+S(t)=%f)",
                   i + 1, dx, dt, t, t+nt, s, self->x + s);
+        *T = t + nt;
         return 1;
       }
       t1 = t;
@@ -307,7 +310,7 @@ static double rfilt_r(
   double a,      // приведенное текущее ускорение
   double dx)     // невязка заданной и текущей позиции
 {
-  double r, r1, r2, s1, s2, v1, v2, a1, a2, nt;
+  double r, r0, r1, r2, s, s0, s1, s2, v0, v1, v2, a0, a1, a2, nt, k;
   double R = self->R; // максимальный рывок
   double Rw = R  * (1. - self->B); // максимальный рабочий (заниженный) рывок
   double sig = (dx >= 0.) ? 1. : -1.;
@@ -331,8 +334,8 @@ static double rfilt_r(
   v2 = v + a + r2 * 0.5;
   a1 = a + r1;
   a2 = a + r2;
-  s1 += rfilt_s(self, Rw, v1, a1, &nt);
-  s2 += rfilt_s(self, Rw, v2, a2, &nt);
+  s1 += rfilt_s(self, Rw, v1, a1, &nt); // S(r1=-R)
+  s2 += rfilt_s(self, Rw, v2, a2, &nt); // S(r2=+R)
 
   if (dx <= s1 && dx <= s2)
   { // торможение
@@ -389,11 +392,14 @@ static double rfilt_r(
       r = 0.;
     }
     else
-    { // найти S(r) ~ dx
+    { // найти r: S(r)=dx
       int i;
-      double s, k = (r2 - r1) / (s2 - s1);
-#if 0
-      double s;
+      r0 = rfilt_limit_r(self, v, a, 0.);
+      s0 = v + a * 0.5 + r0 / 6.;
+      v0 = v + a + r0 * 0.5;
+      a0 = a + r0;
+      s0 += rfilt_s(self, Rw, v0, a0, &nt); // S(r0=0)
+
       if (s2 < s1)
       { // поменять местами s1 <=> s2, r1 <=> r2
         r  = r1;
@@ -401,19 +407,24 @@ static double rfilt_r(
         r2 = r;
         s  = s1;
         s1 = s2;
-        s2 = s; // теперь s1 <= dx <= s2;
+        s2 = s; // теперь s1 < dx < s2;
       }
+      
+      if (s0 >= dx && s0 < s2) // s1 < dx <= s0 < s2
+      {
+        s2 = s0;
+        r2 = r0;
+      }
+      else if (s0 <= dx && s0 > s1) // s1 < s <= dx < s2
+      {
+        s1 = s0;
+        r1 = r0;
+      } // теперь s1 <= dx <= s2
 
-      if (s1 >= 0.)
-      { // 0 <= s1 <= dx <= s2
-        r = r1; 
-      }
-      else
-        r = 0.; // FIXME
-#else
-      //  вычисалить начальное значение методом секущей 
+      //  вычисалить начальное значение методом секущей (S(r) ~ dx) 
+      k = (r2 - r1) / (s2 - s1);
       r = (dx - s1) * k + r1;
-#endif
+
       RFILT_DBG("begin r=%f", r * sig);
 
       // подбор рывка методом простой итерации
@@ -422,7 +433,7 @@ static double rfilt_r(
         double V = v + a + r * 0.5;
         double A = a + r;
         s = v + a * 0.5 + r / 6.;
-        s += rfilt_s(self, Rw, V, A, &nt);
+        s += rfilt_s(self, Rw, V, A, &nt); // S(r)
         r += (dx - s) * k;
         if (s <= dx && i >= (RFILT_ITER_NUM/2)) break; // FIXME
         //RFILT_DBG("iterate i=%i r=%f s(r)=%f",
@@ -443,7 +454,7 @@ double rfilt_step(
   rfilt_t *self, // указатель на внутреннюю структуру фильтра
   double y)      // входное значение для фильтра
 {
-  double dx, r;
+  double dx, r, T;
 
   // ограничить заданное значение
   y = RFILT_LIMIT(y, self->Xmin, self->Xmax);
@@ -451,22 +462,47 @@ double rfilt_step(
   // требуемое перемещение
   dx = y - self->x;
 
+  // вычислить тормозной путь и время торможения
+  self->s = rfilt_s(self, self->R, self->v, self->a, &self->nt);
+
 #if 1
-  // проверить возможность "малого хода"
-  if (rfilt_jump(self, self->v, self->a, dx, 1.0))
+  // проверить возможность "малого хода" за один такт
+  if (rfilt_pipe(self, self->v, self->a, dx, 1.0, &T))
   {
-    RFILT_DBG("pipe mode: x=y=%f v=%f a=%f s=%f, nt=%f",
-              y, self->v, self->a, self->s, self->nt);
+    RFILT_DBG("pipe mode: x=y=%f v=%f a=%f s=%f, nt=%f T=%f",
+              y, self->v, self->a, self->s, self->nt, T);
     self->v = self->a = 0.;
     self->x = y;
     return self->x;
   }
-#else
-  // вычислить тормозной путь и время торможения
-  self->s = rfilt_s(self, self->R, self->v, self->a, &self->nt);
 #endif
 
-  // вычислить рывок
+#if 1
+  // проверить возможность "малого хода" за два такта
+  if (rfilt_pipe(self, self->v, self->a, dx, 2.0, &T))
+  {
+    if (T <= 0.)
+    { // авария
+      self->x = y;
+      self->v = self->a = 0.;
+    }
+    else
+    {
+      double t  = 2.0 - T;
+      double t2 = t * t;
+      double r = 6. * dx / (T * T * T);
+      self->x += dx - r * t2 * t  / 6.;
+      self->v = r * t2 * 0.5;
+      self->a = -r * t; 
+    }
+    RFILT_DBG("slow mode: y=%f x=%f v=%f a=%f s=%f, nt=%f T=%f",
+              y, self->x, self->v, self->a, self->s, self->nt, T);
+  
+    return self->x;
+  }
+#endif
+
+  // вычислить рывок на следующий такт
   r = rfilt_r(self, self->v, self->a, dx);
 
   RFILT_DBG("work: y=%f x=%f v=%f a=%f r=%f dx=%f s=%f x+s=%f nt=%f",
@@ -479,6 +515,13 @@ double rfilt_step(
   self->a += r;
 
   return self->x;
+}
+//-----------------------------------------------------------------------------
+// выполнить шаг экстреннего торможения
+// (функция возвращает траекторию тормозного пути)
+double rfilt_stop(rfilt_t *self)
+{
+  return rfilt_step(self, self->x + self->s);
 }
 //-----------------------------------------------------------------------------
 
